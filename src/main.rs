@@ -1,12 +1,18 @@
+use byteorder::{ByteOrder, LittleEndian};
 use std::{
     io::{prelude::*, BufReader},
     net::TcpListener,
-};
+}; // 1.3.4
+
+use bufstream::BufStream;
 
 struct Config {
     host: String,
     port: u16,
 }
+
+// Login server packets
+const LOGIN_AUTH_ATTEMPT: u16 = 0x0064;
 
 fn main() -> std::io::Result<()> {
     let config = Config {
@@ -20,23 +26,31 @@ fn main() -> std::io::Result<()> {
 
     // accept connections and process them serially
     for stream in listener.incoming() {
-        let stream = stream.unwrap();
-        let mut reader = BufReader::new(&stream);
+        let mut stream = stream.unwrap();
+        let mut stream = BufStream::new(&mut stream);
         println!("GOT A NEW CONNECTION!!");
 
-        let mut packet_type: [u8; 6] = [0; 6];
+        let return_bad_password = true;
 
         loop {
-            let packet_type_check = reader.read_exact(&mut packet_type);
+            // Read the packet type
+            let mut raw_command_type: [u8; 2] = [0; 2];
+            let command_type_check = stream.read_exact(&mut raw_command_type);
 
-            if packet_type_check.is_ok() {
-                println!("PACKET TYPE: {packet_type:?}");
-                if packet_type == [100, 0, 55, 0, 0, 0] {
+            if command_type_check.is_ok() {
+                let command_type = LittleEndian::read_u16(&raw_command_type);
+                println!("COMMAND TYPE: 0x{command_type:04x}");
+                if command_type == LOGIN_AUTH_ATTEMPT {
+                    println!("This is a login attempt command");
+                    // Padding, not sure what these represent yet
+                    let mut padding: [u8; 4] = [0; 4];
+                    stream.read_exact(&mut padding)?;
+
                     let mut username = [0; 24];
-                    reader.read_exact(&mut username)?;
+                    stream.read_exact(&mut username)?;
 
                     let mut password = [0; 24];
-                    reader.read_exact(&mut password)?;
+                    stream.read_exact(&mut password)?;
 
                     println!("RAW LOGIN CREDENTIALS, username={username:?}, password={password:?}");
 
@@ -70,9 +84,25 @@ fn main() -> std::io::Result<()> {
                     )
                     .unwrap();
 
+                    // Padding, not sure.. always 0x00 suffix
+                    let mut padding: [u8; 1] = [0; 1];
+                    stream.read_exact(&mut padding)?;
+
                     println!("LOGIN CREDENTIALS, username={username:?}, password={password:?}");
+
+                    // Fake an invalid login error
+                    if return_bad_password {
+                        println!("Returning invalid password!");
+                        let bad_password: [u8; 30] = [
+                            0xe0, 0x0a, 0x54, 0x14, 0x00, 0x00, 0x2b, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x00, 0x00, 0x2d, 0x00, 0x00, 0x2d, 0x00, 0x00, 0x20, 0x00, 0x00, 0x3a,
+                            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        ];
+                        stream.write_all(&bad_password)?;
+                        continue;
+                    }
                 } else {
-                    println!("UNHANDLED PACKET TYPE: {:?}", packet_type);
+                    println!("UNHANDLED PACKET TYPE: {:?}", command_type);
                     break;
                 }
             } else {
