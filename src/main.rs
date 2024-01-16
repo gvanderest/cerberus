@@ -1,9 +1,12 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use bufstream::BufStream;
 use byteorder::{ByteOrder, LittleEndian};
 use std::{
     io::prelude::*,
-    net::{Shutdown, TcpListener, TcpStream},
+    net::{TcpListener, TcpStream},
+    sync::{Arc, Mutex},
+    thread::{self, sleep},
+    time::Duration,
 };
 
 struct LoginServerConfig {
@@ -24,7 +27,7 @@ struct LoginAuthenticateData {
     unknown_2: u8,
 }
 
-type Stream<'a> = BufStream<&'a mut TcpStream>;
+type Stream = BufStream<TcpStream>;
 
 fn read_login_authenticate_data(stream: &mut Stream) -> Result<LoginAuthenticateData> {
     // Padding, not sure what these represent yet
@@ -150,6 +153,56 @@ fn write_login_character_servers_list(stream: &mut Stream) -> Result<()> {
     Ok(())
 }
 
+fn handle_login_stream(stream: &mut Stream) -> Result<()> {
+    // Determine the type of command being called by connected client
+    let mut raw_command_type: [u8; 2] = [0; 2];
+    let command_type_check = stream.read_exact(&mut raw_command_type);
+    if command_type_check.is_err() {
+        return Err(anyhow!("Connection lost"));
+    }
+
+    let command_type = LittleEndian::read_u16(&raw_command_type);
+    println!("COMMAND TYPE: 0x{command_type:04x}");
+
+    // FIXME: Make a function that maps command prefix to an enum or structs
+
+    // Handle the command from the client
+    if command_type == LOGIN_AUTH_ATTEMPT {
+        println!("This is a login attempt command");
+
+        let auth_data = read_login_authenticate_data(stream)?;
+        let username = auth_data.username;
+        let password = auth_data.password;
+
+        println!("LOGIN CREDENTIALS, username={username:?}, password={password:?}");
+
+        // Fake an invalid login error
+        if password != "asdfasdf" {
+            println!("Returning invalid password!");
+            write_login_invalid_login_error(stream)?;
+            return Err(anyhow!("Invalid username or password"));
+        }
+
+        println!("Returning successful login..");
+        write_login_authenticate_success(stream)?;
+
+        println!("Returning a server list..");
+        write_login_character_servers_list(stream)?;
+    } else {
+        println!("UNHANDLED PACKET TYPE: {:?}", command_type);
+        // FIXME: Pass up an error
+        return Ok(());
+    }
+
+    Ok(())
+}
+
+struct Connection {
+    id: usize,
+    stream: Stream,
+    should_drop: bool,
+}
+
 fn main() -> Result<()> {
     // FIXME: Load host/port/configs from env vars
     let config = LoginServerConfig {
@@ -159,55 +212,44 @@ fn main() -> Result<()> {
     let host_port = format!("{}:{}", config.host, config.port);
     let listener = TcpListener::bind(&host_port)?;
 
+    let connections: Arc<Mutex<Vec<Connection>>> = Arc::new(Mutex::new(vec![]));
+
     println!("Server up and running at {host_port}..");
 
-    // FIXME: Attach all streams to a vector and iterate in a non-blocking way over them to support multiple connections
-    for stream in listener.incoming() {
-        let mut stream = stream.unwrap();
-        stream.set_nodelay(true).unwrap();
-        let mut stream = BufStream::new(&mut stream);
-        println!("GOT A NEW CONNECTION!!");
-
-        loop {
-            // Determine the type of command being called by connected client
-            let mut raw_command_type: [u8; 2] = [0; 2];
-            let command_type_check = stream.read_exact(&mut raw_command_type);
-            if command_type_check.is_err() {
-                println!("Connection lost!");
-                break;
-            }
-            let command_type = LittleEndian::read_u16(&raw_command_type);
-            println!("COMMAND TYPE: 0x{command_type:04x}");
-
-            // FIXME: Make a function that maps command prefix to an enum or structs
-
-            // Handle the command from the client
-            if command_type == LOGIN_AUTH_ATTEMPT {
-                println!("This is a login attempt command");
-
-                let auth_data = read_login_authenticate_data(&mut stream)?;
-                let username = auth_data.username;
-                let password = auth_data.password;
-
-                println!("LOGIN CREDENTIALS, username={username:?}, password={password:?}");
-
-                // Fake an invalid login error
-                if password != "asdfasdf" {
-                    println!("Returning invalid password!");
-                    write_login_invalid_login_error(&mut stream)?;
-                    break;
-                }
-
-                println!("Returning successful login..");
-                write_login_authenticate_success(&mut stream)?;
-
-                println!("Returning a server list..");
-                write_login_character_servers_list(&mut stream)?;
-            } else {
-                println!("UNHANDLED PACKET TYPE: {:?}", command_type);
-                break;
+    // Handle all streams
+    let connections_ref = Arc::clone(&connections);
+    thread::spawn(move || loop {
+        for connection in connections_ref.lock().unwrap().iter_mut() {
+            let result = handle_login_stream(&mut connection.stream);
+            if result.is_err() {
+                // Mark connection for removal
+                println!("Removing connection {}", connection.id);
+                connection.should_drop = true;
             }
         }
+
+        // Drop all connections marked for removal
+        connections_ref.lock().unwrap().retain(|c| !c.should_drop);
+
+        sleep(Duration::from_millis(200));
+    });
+
+    // Connect new streams
+    for (connection_id, stream) in listener.incoming().enumerate() {
+        let stream = stream.unwrap();
+        stream.set_nodelay(true).unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let stream = BufStream::new(stream);
+
+        let streams = Arc::new(&connections);
+        let connection = Connection {
+            id: connection_id,
+            stream,
+            should_drop: false,
+        };
+        println!("Added connection {} from IP {}", connection.id, "XXX");
+        streams.lock().unwrap().push(connection);
     }
+
     Ok(())
 }
