@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use bufstream::BufStream;
 use byteorder::{ByteOrder, LittleEndian};
 use std::{
-    io::prelude::*,
+    io::{prelude::*, ErrorKind},
     net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
     thread::{self, sleep},
@@ -157,8 +157,14 @@ fn handle_login_stream(stream: &mut Stream) -> Result<()> {
     // Determine the type of command being called by connected client
     let mut raw_command_type: [u8; 2] = [0; 2];
     let command_type_check = stream.read_exact(&mut raw_command_type);
-    if command_type_check.is_err() {
-        return Err(anyhow!("Connection lost"));
+
+    if let Err(err) = command_type_check {
+        if err.kind() == ErrorKind::WouldBlock {
+            // Blocking port, not an issue, but nothing to do
+            return Ok(());
+        } else {
+            return Err(anyhow!("Connection lost"));
+        }
     }
 
     let command_type = LittleEndian::read_u16(&raw_command_type);
@@ -231,7 +237,7 @@ fn main() -> Result<()> {
         // Drop all connections marked for removal
         connections_ref.lock().unwrap().retain(|c| !c.should_drop);
 
-        sleep(Duration::from_millis(200));
+        sleep(Duration::from_millis(10));
     });
 
     // Connect new streams
