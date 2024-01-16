@@ -1,6 +1,9 @@
 use bufstream::BufStream;
 use byteorder::{ByteOrder, LittleEndian};
-use std::{io::prelude::*, net::TcpListener};
+use std::{
+    io::prelude::*,
+    net::{Shutdown, TcpListener},
+};
 
 struct LoginServerConfig {
     host: String,
@@ -26,10 +29,11 @@ fn main() -> std::io::Result<()> {
     // accept connections and process them serially
     for stream in listener.incoming() {
         let mut stream = stream.unwrap();
+        stream.set_nodelay(true).unwrap();
         let mut stream = BufStream::new(&mut stream);
         println!("GOT A NEW CONNECTION!!");
 
-        let return_bad_password = true;
+        let return_bad_password = false;
 
         loop {
             // Read the packet type
@@ -99,7 +103,63 @@ fn main() -> std::io::Result<()> {
                             0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                         ];
                         stream.write_all(&bad_password)?;
+                        stream.flush().unwrap();
                         continue;
+                    } else {
+                        println!("Returning successful login..");
+                        let login_success_command: u16 = 0x0a4d;
+                        let weird_bytes: u16 = 0x00a0;
+                        let login_id1: u32 = 123456;
+                        let account_id: u32 = 55555;
+                        let login_id2: u32 = 0;
+                        let unknown_bytes: [u8; 31] = [0; 31];
+
+                        let mut raw_mnemonic: [u8; 16] = [0; 16];
+                        for (ch_index, ch) in "TPZMgc02COiARyrU".chars().enumerate() {
+                            raw_mnemonic[ch_index] = ch as u8;
+                        }
+                        let gender: u8 = 0;
+
+                        let mut packet: Vec<u8> = vec![];
+                        packet.append(&mut login_success_command.to_le_bytes().to_vec());
+                        packet.append(&mut weird_bytes.to_le_bytes().to_vec());
+                        packet.append(&mut login_id1.to_le_bytes().to_vec());
+                        packet.append(&mut account_id.to_le_bytes().to_vec());
+                        packet.append(&mut login_id2.to_le_bytes().to_vec());
+                        packet.append(&mut unknown_bytes.to_vec());
+                        packet.append(&mut raw_mnemonic.to_vec());
+                        packet.append(&mut gender.to_le_bytes().to_vec());
+                        println!("Raw packet: len={}, body={packet:?},", packet.len());
+
+                        stream.flush()?;
+
+                        println!("Returning a server list..");
+                        let server_list_command_prefix: u16 = 0xf180;
+                        let population: u16 = 123;
+                        let ip_suffix: &[u8; 2] = &[1, 70];
+                        let port: u16 = 4501;
+
+                        let name = "Cerberus";
+                        let mut raw_name: [u8; 20] = [0; 20];
+                        for (ch_index, ch) in name.chars().enumerate() {
+                            raw_name[ch_index] = ch as u8;
+                        }
+
+                        let padding_suffix: [u8; 4] = [0; 4];
+
+                        let mut packet: Vec<u8> = vec![];
+                        packet.append(&mut server_list_command_prefix.to_le_bytes().to_vec());
+                        packet.append(&mut ip_suffix.to_vec());
+                        packet.append(&mut port.to_le_bytes().to_vec());
+                        packet.append(&mut raw_name.to_vec());
+                        packet.append(&mut population.to_le_bytes().to_vec());
+                        packet.append(&mut padding_suffix.to_vec());
+                        println!("Raw packet: len={}, body={packet:?},", packet.len());
+                        stream.write_all(&packet)?;
+                        stream.write_all(&packet)?;
+                        stream.write_all(&packet)?;
+
+                        stream.flush()?;
                     }
                 } else {
                     println!("UNHANDLED PACKET TYPE: {:?}", command_type);
