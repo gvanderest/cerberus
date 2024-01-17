@@ -21,19 +21,19 @@ struct LoginServerConfig {
 const LOGIN_AUTH_ATTEMPT: u16 = 0x0064;
 
 struct LoginAuthenticateData {
-    unknown_1: u32,
+    protocol_version: u32,
     username: String,
     password: String,
-    unknown_2: u8,
+    unknown: u8,
 }
 
 type Stream = BufStream<TcpStream>;
 
 fn read_login_authenticate_data(stream: &mut Stream) -> Result<LoginAuthenticateData> {
     // Padding, not sure what these represent yet
-    let mut raw_unknown_1: [u8; 4] = [0; 4];
-    stream.read_exact(&mut raw_unknown_1)?;
-    let unknown_1 = u32::from_le_bytes(raw_unknown_1);
+    let mut raw_protocol_version: [u8; 4] = [0; 4];
+    stream.read_exact(&mut raw_protocol_version)?;
+    let protocol_version = u32::from_le_bytes(raw_protocol_version);
 
     let mut username = [0; 24];
     stream.read_exact(&mut username)?;
@@ -71,22 +71,50 @@ fn read_login_authenticate_data(stream: &mut Stream) -> Result<LoginAuthenticate
     )
     .unwrap();
 
-    let mut raw_unknown_2: [u8; 1] = [0; 1];
-    stream.read_exact(&mut raw_unknown_2)?;
+    let mut raw_unknown: [u8; 1] = [0; 1];
+    stream.read_exact(&mut raw_unknown)?;
 
     Ok(LoginAuthenticateData {
-        unknown_1,
+        protocol_version,
         username,
         password,
-        unknown_2: raw_unknown_2[0],
+        unknown: raw_unknown[0],
     })
 }
 
 fn write_login_invalid_login_error(stream: &mut Stream) -> Result<()> {
-    let bad_password: [u8; 30] = [
-        0xe0, 0x0a, 0x54, 0x14, 0x00, 0x00, 0x2b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2d,
-        0x00, 0x00, 0x2d, 0x00, 0x00, 0x20, 0x00, 0x00, 0x3a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 0x01 - Invalid username and password.
+    // 0x02 - This ID is expired.
+    // 0x03 - Rejected from server.
+    // 0x04 - Account ID blocked by the Game Master Team
+    // 0x05 - Your Game's Exe File is not the latest version
+    // 0x06 - You are prohibited to log in until XX. (not sure how to provide date)
+    // 0x07 - Server is jammed due to overpopulation.  Please try again after few minutes.
+    // 0x08 - This account can't connext the Sakray server.
+    // 0x09 - MSI_REFUSE_BAN_BY_DBA
+    // 0x10 - A korean un-translated message, relates to "password change agreement" URL
+    // 0x11 - This account has been used for illegal program of hacking program.. Block Time: XX.
+    // 0x12 - The possibility of exposure to illegal program, PC virus infection, or Hacking Tool has been detected.
+    // 0x13 - OTP password is 6 digits long
+    // 0x14 - OTP information is unavailable.
+    // 0x15 - Failed to recognize SSO
+    // 0x16 - Your connection is currently delayed. Please reconnect again later.
+    // 0x17 to 0x20 - same as 0x16
+    // 0x20 - Rejected from Server (32)
+    // 0x21 - only otp user login allow
+    // 0x22 - Rejected from Server (34)
+    // 0x23 - Rejected from Server (35)
+    // 0x24 - This account has limited in-game access due to a secondary password mis-input.
+    // 0x25 onward - Rejected from Server (offset + 12 in parens)
+    let reason: u8 = 0x01;
+    let bad_password: [u8; 23] = [
+        0x6a, 0x00, reason, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
+    // let bad_password: [u8; 30] = [
+    //     0xe0, 0x0a, 0x54, 0x14, 0x00, 0x00, 0x2b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2d,
+    //     0x00, 0x00, 0x2d, 0x00, 0x00, 0x20, 0x00, 0x00, 0x3a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // ];
     stream.write_all(&bad_password)?;
     stream.flush().unwrap();
 
@@ -129,28 +157,33 @@ fn write_login_disconnect(stream: &mut Stream, reason: DisconnectReason) -> Resu
 }
 
 fn write_login_authenticate_success(stream: &mut Stream) -> Result<()> {
-    let login_success_command: u16 = 0x0a4d;
-    let weird_bytes: u16 = 0x00a0;
-    let login_id1: u32 = 123456;
-    let account_id: u32 = 55555;
-    let login_id2: u32 = 0;
-    let unknown_bytes: [u8; 31] = [0; 31];
-
-    let mut raw_mnemonic: [u8; 16] = [0; 16];
-    // for (ch_index, ch) in "TPZMgc02COiARyrU".chars().enumerate() {
-    for (ch_index, ch) in "0RUMcyi2rgTPOCAZ".chars().enumerate() {
-        raw_mnemonic[ch_index] = ch as u8;
-    }
+    // let command: u16 = 0x0a4d;
+    let command: u16 = 0x0069;
+    // let command: u16 = 0x0276;
+    // Packets length is .. this packet size of 47 + 32 * server count
+    let login_packets_bytes_length: u16 = 47 + (32 * 1);
+    // let login_packets_bytes_length: u16 = 47 + (32 * 1);
+    let login_id1: u32 = 0x1d266809;
+    let account_id: u32 = 0x005dbb1d;
+    let login_id2: u32 = 0x00000000;
+    let lastlogin_ip: u32 = 0x00000000;
+    let unknown_bytes: [u8; 26] = [0; 26];
     let gender: u8 = 0;
 
+    // let mut raw_mnemonic: [u8; 16] = [0; 16];
+    // for (ch_index, ch) in "TPZMgc02COiARyrU".chars().enumerate() {
+    //     raw_mnemonic[ch_index] = ch as u8;
+    // }
+
     let mut packet: Vec<u8> = vec![];
-    packet.append(&mut login_success_command.to_le_bytes().to_vec());
-    packet.append(&mut weird_bytes.to_le_bytes().to_vec());
+    packet.append(&mut command.to_le_bytes().to_vec());
+    packet.append(&mut login_packets_bytes_length.to_le_bytes().to_vec());
     packet.append(&mut login_id1.to_le_bytes().to_vec());
     packet.append(&mut account_id.to_le_bytes().to_vec());
     packet.append(&mut login_id2.to_le_bytes().to_vec());
+    packet.append(&mut lastlogin_ip.to_le_bytes().to_vec());
     packet.append(&mut unknown_bytes.to_vec());
-    packet.append(&mut raw_mnemonic.to_vec());
+    // packet.append(&mut raw_mnemonic.to_vec());
     packet.append(&mut gender.to_le_bytes().to_vec());
 
     println!("Raw packet: len={}, body={packet:?},", packet.len());
@@ -161,10 +194,9 @@ fn write_login_authenticate_success(stream: &mut Stream) -> Result<()> {
 }
 
 fn write_login_character_servers_list(stream: &mut Stream) -> Result<()> {
-    let server_list_command_prefix: u16 = 0xf180;
-    let population: u16 = 123;
-    let ip_suffix: &[u8; 2] = &[1, 70];
+    let ip: &[u8; 4] = &[192, 168, 1, 70];
     let port: u16 = 4501;
+    let population: u16 = 1557;
 
     let name = "Cerberus";
     let mut raw_name: [u8; 20] = [0; 20];
@@ -175,8 +207,7 @@ fn write_login_character_servers_list(stream: &mut Stream) -> Result<()> {
     let padding_suffix: [u8; 4] = [0; 4];
 
     let mut packet: Vec<u8> = vec![];
-    packet.append(&mut server_list_command_prefix.to_le_bytes().to_vec());
-    packet.append(&mut ip_suffix.to_vec());
+    packet.append(&mut ip.to_vec());
     packet.append(&mut port.to_le_bytes().to_vec());
     packet.append(&mut raw_name.to_vec());
     packet.append(&mut population.to_le_bytes().to_vec());
@@ -222,12 +253,13 @@ fn handle_login_stream(stream: &mut Stream) -> Result<()> {
         if password == "000failpassword" {
             println!("Returning invalid password!");
             write_login_invalid_login_error(stream)?;
-            return Err(anyhow!("Invalid username or password"));
+            return Ok(());
+            // return Err(anyhow!("Invalid username or password"));
         }
 
         if password == "000fail" {
             println!("Returning session exists");
-            write_login_disconnect(stream, DisconnectReason::SessionExists)?;
+            write_login_disconnect(stream, DisconnectReason::Disconnected)?;
             return Err(anyhow!("Session already exists"));
         }
 
@@ -238,8 +270,7 @@ fn handle_login_stream(stream: &mut Stream) -> Result<()> {
         write_login_character_servers_list(stream)?;
     } else {
         println!("UNHANDLED PACKET TYPE: {:?}", command_type);
-        // FIXME: Pass up an error
-        return Ok(());
+        return Err(anyhow!("Unsupported packed type: {:?}", command_type));
     }
 
     Ok(())
