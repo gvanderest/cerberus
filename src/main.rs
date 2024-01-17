@@ -93,6 +93,41 @@ fn write_login_invalid_login_error(stream: &mut Stream) -> Result<()> {
     Ok(())
 }
 
+enum DisconnectReason {
+    Disconnected = 0,
+    ServerClosed = 1,
+    SessionTakenOver = 2,
+    TimeoutReached = 3,
+    ServerJammedRetrySoon = 4,
+    AgeLimit = 5, // "Age Limit from Commandment Tables"
+    IdUnpaid = 6,
+    ServerJammedRetryLater = 7,
+    SessionExists = 8,
+    IpCapacityForCafeFull = 9,
+    SubscriptionEnded = 10,
+    AccountSuspended = 11,
+    ChangeInBillingPolicy = 12,
+    AuthorizedIpMismatch = 13,
+    PreventChargingPlayTime = 14,
+    // 15 is same as 0
+    NotAvailable = 16,
+    // 17 is same as 16
+    AccountalreadyConnected = 18,
+    // 19+ is all "Disconnected"
+}
+
+fn write_login_disconnect(stream: &mut Stream, reason: DisconnectReason) -> Result<()> {
+    let command: u16 = 0x0081;
+    let reason: u8 = 26 as u8;
+    let mut packet: Vec<u8> = vec![];
+    packet.append(&mut command.to_le_bytes().to_vec());
+    packet.append(&mut reason.to_le_bytes().to_vec());
+    stream.write_all(&packet)?;
+    stream.flush().unwrap();
+
+    Ok(())
+}
+
 fn write_login_authenticate_success(stream: &mut Stream) -> Result<()> {
     let login_success_command: u16 = 0x0a4d;
     let weird_bytes: u16 = 0x00a0;
@@ -102,7 +137,8 @@ fn write_login_authenticate_success(stream: &mut Stream) -> Result<()> {
     let unknown_bytes: [u8; 31] = [0; 31];
 
     let mut raw_mnemonic: [u8; 16] = [0; 16];
-    for (ch_index, ch) in "TPZMgc02COiARyrU".chars().enumerate() {
+    // for (ch_index, ch) in "TPZMgc02COiARyrU".chars().enumerate() {
+    for (ch_index, ch) in "0RUMcyi2rgTPOCAZ".chars().enumerate() {
         raw_mnemonic[ch_index] = ch as u8;
     }
     let gender: u8 = 0;
@@ -183,10 +219,16 @@ fn handle_login_stream(stream: &mut Stream) -> Result<()> {
         println!("LOGIN CREDENTIALS, username={username:?}, password={password:?}");
 
         // Fake an invalid login error
-        if password != "asdfasdf" {
+        if password == "000failpassword" {
             println!("Returning invalid password!");
             write_login_invalid_login_error(stream)?;
             return Err(anyhow!("Invalid username or password"));
+        }
+
+        if password == "000fail" {
+            println!("Returning session exists");
+            write_login_disconnect(stream, DisconnectReason::SessionExists)?;
+            return Err(anyhow!("Session already exists"));
         }
 
         println!("Returning successful login..");
@@ -248,12 +290,17 @@ fn main() -> Result<()> {
         let stream = BufStream::new(stream);
 
         let streams = Arc::new(&connections);
+        let peer_address = stream.get_ref().peer_addr().unwrap();
         let connection = Connection {
             id: connection_id,
             stream,
             should_drop: false,
         };
-        println!("Added connection {} from IP {}", connection.id, "XXX");
+        println!(
+            "Added connection {} from IP {}",
+            connection.id,
+            peer_address.ip()
+        );
         streams.lock().unwrap().push(connection);
     }
 
