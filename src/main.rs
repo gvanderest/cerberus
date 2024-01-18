@@ -3,6 +3,7 @@ use bufstream::BufStream;
 use byteorder::{ByteOrder, LittleEndian};
 use std::{
     io::{prelude::*, ErrorKind},
+    mem::replace,
     net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
     thread::{self, sleep},
@@ -82,7 +83,9 @@ fn read_login_authenticate_data(stream: &mut Stream) -> Result<LoginAuthenticate
     })
 }
 
-fn write_login_invalid_login_error(stream: &mut Stream) -> Result<()> {
+fn write_login_auth_error(stream: &mut Stream) -> Result<()> {
+    // Command: 0x006a
+    // FIXME: Move these reasons into enums
     // 0x01 - Invalid username and password.
     // 0x02 - This ID is expired.
     // 0x03 - Rejected from server.
@@ -121,7 +124,7 @@ fn write_login_invalid_login_error(stream: &mut Stream) -> Result<()> {
     Ok(())
 }
 
-enum DisconnectReason {
+enum BanReason {
     Disconnected = 0,
     ServerClosed = 1,
     SessionTakenOver = 2,
@@ -144,7 +147,7 @@ enum DisconnectReason {
     // 19+ is all "Disconnected"
 }
 
-fn write_login_disconnect(stream: &mut Stream, reason: DisconnectReason) -> Result<()> {
+fn write_login_banned(stream: &mut Stream, reason: BanReason) -> Result<()> {
     let command: u16 = 0x0081;
     let reason: u8 = 26 as u8;
     let mut packet: Vec<u8> = vec![];
@@ -156,24 +159,27 @@ fn write_login_disconnect(stream: &mut Stream, reason: DisconnectReason) -> Resu
     Ok(())
 }
 
+fn write_packet(packet: &Vec<u8>, stream: &mut Stream) -> Result<()> {
+    println!("Raw packet: len={}, body={packet:?},", packet.len());
+    stream.write_all(packet)?;
+    stream.flush()?;
+
+    Ok(())
+}
+
 fn write_login_authenticate_success(stream: &mut Stream) -> Result<()> {
-    // let command: u16 = 0x0a4d;
-    let command: u16 = 0x0069;
-    // let command: u16 = 0x0276;
-    // Packets length is .. this packet size of 47 + 32 * server count
-    let login_packets_bytes_length: u16 = 47 + (32 * 1);
-    // let login_packets_bytes_length: u16 = 47 + (32 * 1);
+    let combine_packets = true;
+
+    let command: u16 = 0x0ac4;
+    let login_packets_bytes_length: u16 = 0; // This will be computed and replaced out in later steps.
     let login_id1: u32 = 0x1d266809;
     let account_id: u32 = 0x005dbb1d;
     let login_id2: u32 = 0x00000000;
-    let lastlogin_ip: u32 = 0x00000000;
-    let unknown_bytes: [u8; 26] = [0; 26];
+    let last_login_ip: u32 = 0x00000000; // Not used, zero
+    let last_login_time: [u8; 26] = [0; 26]; // Not used, zero
     let gender: u8 = 0;
-
-    // let mut raw_mnemonic: [u8; 16] = [0; 16];
-    // for (ch_index, ch) in "TPZMgc02COiARyrU".chars().enumerate() {
-    //     raw_mnemonic[ch_index] = ch as u8;
-    // }
+    let session_id = "TPZMgc02C0iARyrU"; // TODO: Come up with a hash for this value, and determine when it gets used
+    let twitter_flag: u8 = 0;
 
     let mut packet: Vec<u8> = vec![];
     packet.append(&mut command.to_le_bytes().to_vec());
@@ -181,22 +187,46 @@ fn write_login_authenticate_success(stream: &mut Stream) -> Result<()> {
     packet.append(&mut login_id1.to_le_bytes().to_vec());
     packet.append(&mut account_id.to_le_bytes().to_vec());
     packet.append(&mut login_id2.to_le_bytes().to_vec());
-    packet.append(&mut lastlogin_ip.to_le_bytes().to_vec());
-    packet.append(&mut unknown_bytes.to_vec());
-    // packet.append(&mut raw_mnemonic.to_vec());
+    packet.append(&mut last_login_ip.to_le_bytes().to_vec());
+    packet.append(&mut last_login_time.to_vec());
     packet.append(&mut gender.to_le_bytes().to_vec());
+    packet.append(&mut session_id.as_bytes().to_vec());
+    packet.append(&mut twitter_flag.to_le_bytes().to_vec());
 
-    println!("Raw packet: len={}, body={packet:?},", packet.len());
+    let mut server_list_packet = get_login_character_servers_list_packet();
 
-    stream.write_all(&packet)?;
-    stream.flush()?;
+    // Rewrite the length portion of the packet with the compute of success+server_list packets
+    let base_packet_len = packet.len() as u16;
+    let total_packet_len = base_packet_len + server_list_packet.len() as u16;
+    let packet_len_as_bytes = total_packet_len.to_le_bytes();
+    for i in 0..=1 {
+        let _ = replace(&mut packet[2 + i], packet_len_as_bytes[i]);
+    }
+
+    // FIXME: Remove the block that doesn't apply once we prove this works
+    if combine_packets {
+        let mut combined_packet = packet.clone();
+        combined_packet.append(&mut server_list_packet);
+        write_packet(&combined_packet, stream)?;
+    } else {
+        write_packet(&packet, stream)?;
+        write_packet(&server_list_packet, stream)?;
+    }
+
     Ok(())
 }
 
-fn write_login_character_servers_list(stream: &mut Stream) -> Result<()> {
+enum GeneralPopulation {
+    Smooth = 0,
+    Normal = 1,
+    Busy = 2,
+    Crowded = 3,
+    Undefined = 4,
+}
+
+fn get_login_character_servers_list_packet() -> Vec<u8> {
     let ip: &[u8; 4] = &[192, 168, 1, 70];
-    let port: u16 = 4501;
-    let population: u16 = 1557;
+    let port: u16 = 4500;
 
     let name = "Cerberus";
     let mut raw_name: [u8; 20] = [0; 20];
@@ -204,19 +234,49 @@ fn write_login_character_servers_list(stream: &mut Stream) -> Result<()> {
         raw_name[ch_index] = ch as u8;
     }
 
-    let padding_suffix: [u8; 4] = [0; 4];
+    let population: u16 = GeneralPopulation::Undefined as u16;
+    let state: u16 = 0x00; // TODO: Figure out what these flags mean
+    let property: u16 = 0x00; // TODO: Figure out what these properties mean
+    let unknown: [u8; 128] = [0; 128];
 
     let mut packet: Vec<u8> = vec![];
     packet.append(&mut ip.to_vec());
     packet.append(&mut port.to_le_bytes().to_vec());
     packet.append(&mut raw_name.to_vec());
     packet.append(&mut population.to_le_bytes().to_vec());
-    packet.append(&mut padding_suffix.to_vec());
+    packet.append(&mut state.to_le_bytes().to_vec());
+    packet.append(&mut property.to_le_bytes().to_vec());
+    packet.append(&mut unknown.to_vec());
 
-    println!("Raw packet: len={}, body={packet:?},", packet.len());
+    packet
+}
 
-    stream.write_all(&packet)?;
-    stream.flush()?;
+fn handle_login_attempt(stream: &mut Stream) -> Result<()> {
+    println!("This is a login attempt command");
+
+    let auth_data = read_login_authenticate_data(stream)?;
+    let username = auth_data.username;
+    let password = auth_data.password;
+
+    println!("LOGIN CREDENTIALS, username={username:?}, password={password:?}");
+
+    // Fake an invalid login error
+    if password == "000failpassword" {
+        println!("Returning invalid password!");
+        write_login_auth_error(stream)?;
+        return Ok(());
+        // return Err(anyhow!("Invalid username or password"));
+    }
+
+    if password == "000fail" {
+        println!("Returning session exists");
+        write_login_banned(stream, BanReason::Disconnected)?;
+        return Err(anyhow!("Session already exists"));
+    }
+
+    println!("Returning successful login and server list..");
+    write_login_authenticate_success(stream)?;
+
     Ok(())
 }
 
@@ -241,33 +301,7 @@ fn handle_login_stream(stream: &mut Stream) -> Result<()> {
 
     // Handle the command from the client
     if command_type == LOGIN_AUTH_ATTEMPT {
-        println!("This is a login attempt command");
-
-        let auth_data = read_login_authenticate_data(stream)?;
-        let username = auth_data.username;
-        let password = auth_data.password;
-
-        println!("LOGIN CREDENTIALS, username={username:?}, password={password:?}");
-
-        // Fake an invalid login error
-        if password == "000failpassword" {
-            println!("Returning invalid password!");
-            write_login_invalid_login_error(stream)?;
-            return Ok(());
-            // return Err(anyhow!("Invalid username or password"));
-        }
-
-        if password == "000fail" {
-            println!("Returning session exists");
-            write_login_disconnect(stream, DisconnectReason::Disconnected)?;
-            return Err(anyhow!("Session already exists"));
-        }
-
-        println!("Returning successful login..");
-        write_login_authenticate_success(stream)?;
-
-        println!("Returning a server list..");
-        write_login_character_servers_list(stream)?;
+        handle_login_attempt(stream)?;
     } else {
         println!("UNHANDLED PACKET TYPE: {:?}", command_type);
         return Err(anyhow!("Unsupported packed type: {:?}", command_type));

@@ -17,7 +17,7 @@ Currently have the following goals, which will be extended in the future if they
 - [x] Connect to login server
 - [ ] Create account with "username_M" format seen on some servers
 - [ ] Delete account
-- [ ] Select which character server to connect to
+- [x] Select which character server to connect to
 - [ ] Connect to character server
 - [ ] Create character
 - [ ] Delete character
