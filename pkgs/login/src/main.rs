@@ -348,26 +348,30 @@ fn main() -> Result<()> {
     });
 
     // Connect new streams
-    for (connection_id, stream) in listener.incoming().enumerate() {
-        let stream = stream.unwrap();
-        stream.set_nodelay(true).unwrap();
-        stream.set_nonblocking(true).unwrap();
-        let stream = BufStream::new(stream);
+    thread::spawn(move || loop {
+        for (connection_id, stream) in listener.incoming().enumerate() {
+            let stream = stream.unwrap();
+            stream.set_nodelay(true).unwrap();
+            stream.set_nonblocking(true).unwrap();
+            let stream = BufStream::new(stream);
 
-        let streams = Arc::new(&connections);
-        let peer_address = stream.get_ref().peer_addr().unwrap();
-        let connection = Connection {
-            id: connection_id,
-            stream,
-            should_drop: false,
-        };
-        println!(
-            "Added connection {} from IP {}",
-            connection.id,
-            peer_address.ip()
-        );
-        streams.lock().unwrap().push(connection);
+            let streams = Arc::new(&connections);
+            let peer_address = stream.get_ref().peer_addr().unwrap();
+            let connection = Connection {
+                id: connection_id,
+                stream,
+                should_drop: false,
+            };
+            println!(
+                "Added connection {} from IP {}",
+                connection.id,
+                peer_address.ip()
+            );
+            streams.lock().unwrap().push(connection);
+        }
+    });
+
+    loop {
+        sleep(Duration::from_millis(1_000));
     }
-
-    Ok(())
 }
