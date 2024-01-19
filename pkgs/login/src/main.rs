@@ -1,15 +1,12 @@
 use anyhow::{anyhow, Result};
-use bufstream::BufStream;
 use byteorder::{ByteOrder, LittleEndian};
 use common::get_banner;
 use log::info;
-use std::{
-    io::{prelude::*, ErrorKind},
-    mem::replace,
+use std::{io::ErrorKind, mem::replace, net::SocketAddr, sync::Arc};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt, BufStream},
     net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex},
-    thread::{self, sleep},
-    time::Duration,
+    sync::{Mutex, MutexGuard},
 };
 
 struct LoginServerConfig {
@@ -22,29 +19,27 @@ struct LoginServerConfig {
 // Login server packets
 const LOGIN_AUTH_ATTEMPT: u16 = 0x0064;
 
-struct LoginAuthenticateData {
+struct AuthData {
     protocol_version: u32,
     username: String,
     password: String,
     unknown: u8,
 }
 
-type Stream = BufStream<TcpStream>;
+type MutexStream<'a> = MutexGuard<'a, BufStream<TcpStream>>;
 
-fn read_login_authenticate_data(stream: &mut Stream) -> Result<LoginAuthenticateData> {
+async fn read_login_authenticate_data(stream: &mut MutexStream<'_>) -> Result<AuthData> {
     // Padding, not sure what these represent yet
-    let mut raw_protocol_version: [u8; 4] = [0; 4];
-    stream.read_exact(&mut raw_protocol_version)?;
-    let protocol_version = u32::from_le_bytes(raw_protocol_version);
-
+    let protocol_version = stream.read_u32_le().await.unwrap();
     let mut username = [0; 24];
-    stream.read_exact(&mut username)?;
+    stream.read_exact(&mut username).await?;
 
     let mut password = [0; 24];
-    stream.read_exact(&mut password)?;
+    stream.read_exact(&mut password).await?;
 
     println!("RAW LOGIN CREDENTIALS, username={username:?}, password={password:?}");
 
+    // FIXME: Write a "read until null function"
     let username_index_of_null = username.iter().enumerate().find(|(_index, c)| **c == 0);
     let username = String::from_utf8(
         username
@@ -73,18 +68,17 @@ fn read_login_authenticate_data(stream: &mut Stream) -> Result<LoginAuthenticate
     )
     .unwrap();
 
-    let mut raw_unknown: [u8; 1] = [0; 1];
-    stream.read_exact(&mut raw_unknown)?;
+    let _unknown = stream.read_u8().await.unwrap();
 
-    Ok(LoginAuthenticateData {
+    Ok(AuthData {
         protocol_version,
         username,
         password,
-        unknown: raw_unknown[0],
+        unknown: _unknown,
     })
 }
 
-fn write_login_auth_error(stream: &mut Stream) -> Result<()> {
+async fn write_login_auth_error(stream: &mut MutexStream<'_>) -> Result<()> {
     // Command: 0x006a
     // FIXME: Move these reasons into enums
     // 0x01 - Invalid username and password.
@@ -119,8 +113,8 @@ fn write_login_auth_error(stream: &mut Stream) -> Result<()> {
     //     0xe0, 0x0a, 0x54, 0x14, 0x00, 0x00, 0x2b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2d,
     //     0x00, 0x00, 0x2d, 0x00, 0x00, 0x20, 0x00, 0x00, 0x3a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     // ];
-    stream.write_all(&bad_password)?;
-    stream.flush().unwrap();
+    stream.write_all(&bad_password).await?;
+    stream.flush().await?;
 
     Ok(())
 }
@@ -148,27 +142,24 @@ enum BanReason {
     // 19+ is all "Disconnected"
 }
 
-fn write_login_banned(stream: &mut Stream, reason: BanReason) -> Result<()> {
+async fn write_packet(packet: &Vec<u8>, stream: &mut MutexStream<'_>) -> Result<()> {
+    println!("Raw packet: len={}, body={packet:?},", packet.len());
+    stream.write_all(packet).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+async fn write_login_banned(stream: &mut MutexStream<'_>, reason: BanReason) -> Result<()> {
     let command: u16 = 0x0081;
-    let reason: u8 = 26 as u8;
+    let reason: u8 = reason as u8;
     let mut packet: Vec<u8> = vec![];
     packet.append(&mut command.to_le_bytes().to_vec());
     packet.append(&mut reason.to_le_bytes().to_vec());
-    stream.write_all(&packet)?;
-    stream.flush().unwrap();
-
+    write_packet(&packet, stream).await?;
     Ok(())
 }
 
-fn write_packet(packet: &Vec<u8>, stream: &mut Stream) -> Result<()> {
-    println!("Raw packet: len={}, body={packet:?},", packet.len());
-    stream.write_all(packet)?;
-    stream.flush()?;
-
-    Ok(())
-}
-
-fn write_login_authenticate_success(stream: &mut Stream) -> Result<()> {
+async fn write_login_authenticate_success(stream: &mut MutexStream<'_>) -> Result<()> {
     let combine_packets = true;
 
     let command: u16 = 0x0ac4;
@@ -208,10 +199,10 @@ fn write_login_authenticate_success(stream: &mut Stream) -> Result<()> {
     if combine_packets {
         let mut combined_packet = packet.clone();
         combined_packet.append(&mut server_list_packet);
-        write_packet(&combined_packet, stream)?;
+        write_packet(&combined_packet, stream).await?;
     } else {
-        write_packet(&packet, stream)?;
-        write_packet(&server_list_packet, stream)?;
+        write_packet(&packet, stream).await?;
+        write_packet(&server_list_packet, stream).await?;
     }
 
     Ok(())
@@ -252,10 +243,10 @@ fn get_login_character_servers_list_packet() -> Vec<u8> {
     packet
 }
 
-fn handle_login_attempt(stream: &mut Stream) -> Result<()> {
+async fn handle_login_attempt(stream: &mut MutexStream<'_>) -> Result<()> {
     println!("This is a login attempt command");
 
-    let auth_data = read_login_authenticate_data(stream)?;
+    let auth_data = read_login_authenticate_data(stream).await.unwrap();
     let username = auth_data.username;
     let password = auth_data.password;
 
@@ -264,27 +255,27 @@ fn handle_login_attempt(stream: &mut Stream) -> Result<()> {
     // Fake an invalid login error
     if password == "000failpassword" {
         println!("Returning invalid password!");
-        write_login_auth_error(stream)?;
+        write_login_auth_error(stream).await?;
         return Ok(());
         // return Err(anyhow!("Invalid username or password"));
     }
 
     if password == "000fail" {
         println!("Returning session exists");
-        write_login_banned(stream, BanReason::Disconnected)?;
+        write_login_banned(stream, BanReason::Disconnected).await?;
         return Err(anyhow!("Session already exists"));
     }
 
     println!("Returning successful login and server list..");
-    write_login_authenticate_success(stream)?;
+    write_login_authenticate_success(stream).await?;
 
     Ok(())
 }
 
-fn handle_login_stream(stream: &mut Stream) -> Result<()> {
+async fn handle_command(stream: &mut MutexStream<'_>) -> Result<()> {
     // Determine the type of command being called by connected client
     let mut raw_command_type: [u8; 2] = [0; 2];
-    let command_type_check = stream.read_exact(&mut raw_command_type);
+    let command_type_check = stream.read_exact(&mut raw_command_type).await;
 
     if let Err(err) = command_type_check {
         if err.kind() == ErrorKind::WouldBlock {
@@ -302,7 +293,7 @@ fn handle_login_stream(stream: &mut Stream) -> Result<()> {
 
     // Handle the command from the client
     if command_type == LOGIN_AUTH_ATTEMPT {
-        handle_login_attempt(stream)?;
+        handle_login_attempt(stream).await?;
     } else {
         println!("UNHANDLED PACKET TYPE: {:?}", command_type);
         return Err(anyhow!("Unsupported packed type: {:?}", command_type));
@@ -313,11 +304,12 @@ fn handle_login_stream(stream: &mut Stream) -> Result<()> {
 
 struct Connection {
     id: usize,
-    stream: Stream,
-    should_drop: bool,
+    address: SocketAddr,
+    stream: Arc<Mutex<BufStream<TcpStream>>>,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     env_logger::init();
 
     // FIXME: Load host/port/configs from env vars
@@ -326,9 +318,9 @@ fn main() -> Result<()> {
         port: 6900,
     };
     let host_port = format!("{}:{}", config.host, config.port);
-    let listener = TcpListener::bind(&host_port)?;
+    let listener = TcpListener::bind(&host_port).await?;
 
-    let connections: Arc<Mutex<Vec<Connection>>> = Arc::new(Mutex::new(vec![]));
+    let all_connections: Arc<Mutex<Vec<Connection>>> = Arc::new(Mutex::new(vec![]));
 
     info!("");
     for line in get_banner() {
@@ -337,49 +329,42 @@ fn main() -> Result<()> {
     info!("");
     info!("Login server started on {}:{}..", config.host, config.port);
 
-    // Handle all streams
-    let connections_ref = Arc::clone(&connections);
-    thread::spawn(move || loop {
-        for connection in connections_ref.lock().unwrap().iter_mut() {
-            let result = handle_login_stream(&mut connection.stream);
-            if result.is_err() {
-                // Mark connection for removal
-                println!("Removing connection {}", connection.id);
-                connection.should_drop = true;
-            }
-        }
-
-        // Drop all connections marked for removal
-        connections_ref.lock().unwrap().retain(|c| !c.should_drop);
-
-        sleep(Duration::from_millis(10));
-    });
-
     // Connect new streams
-    thread::spawn(move || loop {
-        for (connection_id, stream) in listener.incoming().enumerate() {
-            let stream = stream.unwrap();
-            stream.set_nodelay(true).unwrap();
-            stream.set_nonblocking(true).unwrap();
-            let stream = BufStream::new(stream);
-
-            let streams = Arc::new(&connections);
-            let peer_address = stream.get_ref().peer_addr().unwrap();
-            let connection = Connection {
-                id: connection_id,
-                stream,
-                should_drop: false,
-            };
-            println!(
-                "Added connection {} from IP {}",
-                connection.id,
-                peer_address.ip()
-            );
-            streams.lock().unwrap().push(connection);
-        }
-    });
-
+    let mut latest_connection_id: usize = 0;
     loop {
-        sleep(Duration::from_millis(1_000));
+        let (raw_stream, address) = listener.accept().await.unwrap();
+        latest_connection_id += 1;
+        raw_stream.set_nodelay(true).unwrap();
+
+        info!("{address} connected");
+
+        let original_stream = Arc::new(Mutex::new(BufStream::new(raw_stream)));
+
+        let connections = all_connections.clone();
+        let stream = original_stream.clone();
+
+        tokio::spawn(async move {
+            // Add to the list of connections
+            let connection_id = latest_connection_id;
+            connections.lock().await.push(Connection {
+                id: connection_id,
+                address,
+                stream: stream.clone(),
+            });
+            info!("{address} connected");
+
+            loop {
+                let mut stream = stream.lock().await;
+                let result = handle_command(&mut stream).await;
+
+                if result.is_err() {
+                    break;
+                }
+            }
+
+            // Disconnect and remove from connections list
+            connections.lock().await.retain(|c| c.id != connection_id);
+            info!("{address} disconnected");
+        });
     }
 }

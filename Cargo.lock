@@ -202,6 +202,7 @@ dependencies = [
  "common",
  "env_logger",
  "log",
+ "tokio",
 ]
 
 [[package]]
