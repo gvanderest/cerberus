@@ -2,7 +2,7 @@ use common::get_banner;
 use log::{info, warn};
 use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncReadExt, BufStream},
+    io::{AsyncReadExt, AsyncWriteExt, BufStream},
     net::{TcpListener, TcpStream},
     sync::{Mutex, MutexGuard},
 };
@@ -28,13 +28,20 @@ struct AuthData {
 }
 
 #[derive(Debug)]
+struct PingData {
+    account_id: u32,
+}
+
+#[derive(Debug)]
 enum CharCommand {
     Auth(u16, AuthData),
+    Ping(u16, PingData),
     Unknown(u16, Vec<u8>),
     Disconnected,
 }
 
 const AUTH_COMMAND: u16 = 0x0065;
+const PING_COMMAND: u16 = 0x0187;
 
 type MutexStream<'a> = MutexGuard<'a, BufStream<TcpStream>>;
 
@@ -60,6 +67,12 @@ async fn parse_auth_command(stream: &mut MutexStream<'_>) -> AuthData {
     }
 }
 
+async fn parse_ping_command(stream: &mut MutexStream<'_>) -> PingData {
+    let account_id = stream.read_u32_le().await.unwrap();
+
+    PingData { account_id }
+}
+
 async fn parse_incoming_command(stream: &mut MutexStream<'_>) -> CharCommand {
     let mut raw_command: [u8; 2] = [0; 2];
     stream.read_exact(&mut raw_command).await.unwrap();
@@ -67,6 +80,7 @@ async fn parse_incoming_command(stream: &mut MutexStream<'_>) -> CharCommand {
 
     match command {
         AUTH_COMMAND => CharCommand::Auth(command, parse_auth_command(stream).await),
+        PING_COMMAND => CharCommand::Ping(command, parse_ping_command(stream).await),
         _ => {
             // Read everything, then return
             let mut all_data = vec![];
@@ -74,6 +88,24 @@ async fn parse_incoming_command(stream: &mut MutexStream<'_>) -> CharCommand {
             CharCommand::Unknown(command, all_data)
         }
     }
+}
+
+async fn write_authentication_echo(
+    account_id: u32,
+    stream: &mut MutexStream<'_>,
+) -> io::Result<()> {
+    stream.write_u32_le(account_id).await.unwrap();
+    stream.flush().await.unwrap();
+
+    Ok(())
+}
+
+async fn write_ping_echo(account_id: u32, stream: &mut MutexStream<'_>) -> io::Result<()> {
+    stream.write_u16_le(PING_COMMAND).await.unwrap();
+    stream.write_u32_le(account_id).await.unwrap();
+    stream.flush().await.unwrap();
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -138,13 +170,18 @@ async fn main() -> io::Result<()> {
                         break;
                     }
                     CharCommand::Unknown(command, data) => {
-                        warn!("Unhandled command: 0x{command:04x}: {data:?}");
-                        continue;
+                        warn!("Unknown command: 0x{command:04x}: {data:?}");
                     }
-                    _ => {
-                        info!("Happy command! {result:?}");
-                        continue;
+                    CharCommand::Ping(_command, data) => {
+                        write_ping_echo(data.account_id, &mut stream).await.unwrap();
                     }
+                    CharCommand::Auth(_command, data) => {
+                        write_authentication_echo(data.account_id, &mut stream)
+                            .await
+                            .unwrap();
+                    } // _ => {
+                      //     info!("Known, but unhandled, command: {result:?}");
+                      // }
                 }
             }
 
