@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use bufstream::BufStream;
 use byteorder::{ByteOrder, LittleEndian};
+use common::get_banner;
+use log::info;
 use std::{
     io::{prelude::*, ErrorKind},
     mem::replace,
@@ -14,7 +16,6 @@ struct LoginServerConfig {
     host: String,
     port: u16,
 }
-// TODO: Spin up character server
 // TODO: When auth successful to login server, allow-list connection for a time period to character server for selection
 // TODO: On character selection, allow-list connection for map servers.. have servers maintain allowed IPs list, to identify hacking attempts and block
 
@@ -317,6 +318,8 @@ struct Connection {
 }
 
 fn main() -> Result<()> {
+    env_logger::init();
+
     // FIXME: Load host/port/configs from env vars
     let config = LoginServerConfig {
         host: "0.0.0.0".to_string(),
@@ -327,7 +330,12 @@ fn main() -> Result<()> {
 
     let connections: Arc<Mutex<Vec<Connection>>> = Arc::new(Mutex::new(vec![]));
 
-    println!("Server up and running at {host_port}..");
+    info!("");
+    for line in get_banner() {
+        info!("{line}");
+    }
+    info!("");
+    info!("Login server started on {}:{}..", config.host, config.port);
 
     // Handle all streams
     let connections_ref = Arc::clone(&connections);

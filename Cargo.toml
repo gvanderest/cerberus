@@ -3,4 +3,4 @@ resolver = "2"
 members = [
     "pkgs/login",
     "pkgs/char"
-]
+, "pkgs/common"]
